@@ -1,0 +1,12 @@
+db = dict(
+    dbname='', user='', password='', host='', port=5432
+)
+lastfm = dict(
+    key='',
+    user=''
+)
+subsonic = dict(
+    baseurl='',
+    user='',
+    password=''
+)

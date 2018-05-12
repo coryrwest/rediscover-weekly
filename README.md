@@ -7,6 +7,18 @@ Rediscover Weekly will generate a playlist every week of songs that you like and
 
 Rediscover weekly uses Subsonic to both track your play counts and build the playlist for listening.
 
+## Usage
+### Download scrobbles
+```
+python ./rediscover_weekly.py scrobble
+```
+
+### Build playlist
+This will overwrite the current Rediscover Weekly playlist.
+```
+python ./rediscover_weekly.py playlist
+```
+
 ## Prerequisites
  - A Last.fm account (used for play counts)
  - A subsonic instance

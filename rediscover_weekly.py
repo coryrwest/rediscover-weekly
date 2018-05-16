@@ -9,18 +9,25 @@ import config
 import sys
 from dateutil import parser
 import time
+import Levenshtein
 
-conn = psycopg2.connect(config.db)
+conn = psycopg2.connect(dbname=config.db['dbname'], user=config.db['user'], password=config.db['password'], host=config.db['host'], port=config.db['port'])
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-list_length = 100
-randomness = 20
+list_length = config.playlist_options['length']
+# percentage of random songs (0 play count) in the playlist
+randomness = config.playlist_options['randomness']
+# favoritism settings
+# how to pick songs with high play counts
+# percentage of songs in the playlist that are considered favorites
+# (top 20% of play counts)
+degree_of_favorite = 30
 num_of_random = int(round((list_length * (randomness / 100))))
 url = '{base}/rest/{resource}?u={user}&t={password}&s={salt}&v=1.2.0&c=rediscoverweekly{query}'
 user = config.subsonic['user']
 base = config.subsonic['baseurl']
-passwd = config.subsonic['passwd']
+passwd = config.subsonic['password']
 
 
 def randomword(length):
@@ -38,9 +45,30 @@ def get_scrobble_list():
         group by name, artist, album
         order by random
         limit %s""" % ((list_length - num_of_random),))
+    # TODO: eventually check most played songs and limit their place in the playlist.
     try:
         songs = cur.fetchall()
         return songs
+    except Exception as e:
+        logger.info('Failed to retrieve scrobbled tracks')
+        logger.info(e)
+    cur.close()
+    conn.close()
+
+
+# for determining most listened to songs to ensure that there is variety in the playlist.
+def get_max_plays():
+    cur = conn.cursor()
+    cur.execute("""
+        select
+          count(*), name, artist, album
+        from trackscrobbles
+        group by name, artist, album
+        order by count desc
+        limit 1""")
+    try:
+        song = cur.fetchone()
+        return song[0]
     except Exception as e:
         logger.info('Failed to retrieve scrobbled tracks')
         logger.info(e)
@@ -57,7 +85,7 @@ def get_url(resource, query):
 
 
 def build_songid_list(songs):
-    r = requests.get(get_url('getRandomSongs', '&size=200'))
+    r = requests.get(get_url('getRandomSongs', '&size=400'))
     s = r.content
     x = minidom.parseString(s)
     randomsongs = x.getElementsByTagName('song')
@@ -81,13 +109,48 @@ def build_songid_list(songs):
         s = r.content
         list = minidom.parseString(s)
         listsongs = list.getElementsByTagName('song')
-        thesong = [i for i in listsongs if str(i.attributes['title'].value) == str(name)]
+        thesong = []
+        for s in listsongs:
+            if match_song(s.attributes['title'].value, name, s.attributes['artist'].value, artist):
+                thesong = [s]
+                break
         if len(thesong) == 0:
             logger.warn('No song found for %s' % (name,))
-        else:
-            newsongs.append(thesong[0].attributes['id'].value)
+            break
+        newsongs.append(thesong[0].attributes['id'].value)
 
     return newsongs
+
+
+def match_song(newSongName, searchSongName, newArtistName, searchedArtistName):
+    # ------
+    #  SONG
+    # ------
+    newsong = str(newSongName).lower()
+    searchedsong = str(searchSongName).lower()
+    songNameMatch = False
+    if newsong == searchedsong:
+        songNameMatch = True
+    # If distance is less than 10% of length then match
+    distance = Levenshtein.distance(newsong, searchedsong)
+    threshold = int(round((len(searchedsong) * .1)))
+    if distance < threshold:
+        songNameMatch = True
+    # ------
+    # ARTIST
+    # ------
+    newartist = str(newArtistName).lower()
+    searchedartist = str(searchedArtistName).lower()
+    artistMatch = False
+    if newartist == searchedartist:
+        artistMatch = True
+    # If distance is less than 10% of length then match
+    distance = Levenshtein.distance(newartist, searchedartist)
+    threshold = int(round((len(searchedartist) * .1)))
+    if distance < threshold:
+        artistMatch = True
+
+    return songNameMatch and artistMatch
 
 
 def build_playlist(songidlist):
@@ -142,10 +205,10 @@ def get_scrobbles():
 
 
 if __name__ == "__main__":
-    type =sys.argv[1]
+    type = sys.argv[1]
     if type == 'scrobble':
         get_scrobbles()
     else:
         songs = get_scrobble_list()
         songlist = build_songid_list(songs)
-        build_playlist(songlist)
+        #build_playlist(songlist)

@@ -10,3 +10,9 @@ subsonic = dict(
     user='',
     password=''
 )
+playlist_options = dict(
+    # number of songs
+    length=100,
+    # randomness percentage
+    randomness=20
+)

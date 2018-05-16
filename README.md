@@ -25,10 +25,7 @@ python ./rediscover_weekly.py playlist
  - Postgresql (hopefully support SQLite)
 
 ## Future Features
- - Configurable randomness
- - Configurable playlist length
  - Take play counts into account instead of just checking that they aren't 0
- - Better song matching
  - SQLite support
  - MySQL support
  - Google Play support?

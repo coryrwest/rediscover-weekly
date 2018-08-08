@@ -5,10 +5,11 @@ lastfm = dict(
     key='',
     user=''
 )
-subsonic = dict(
-    baseurl='',
+subsonicdb = dict(
+    dbname='',
     user='',
-    password=''
+    password='',
+    host=''
 )
 playlist_options = dict(
     # number of songs

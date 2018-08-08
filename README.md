@@ -7,6 +7,16 @@ Rediscover Weekly will generate a playlist every week of songs that you like and
 
 Rediscover weekly uses Subsonic to both track your play counts and build the playlist for listening.
 
+
+## Prerequisites
+ - A subsonic instance
+ - MariaDB
+
+Subsonic must be set up to use an external database. There is not support for Subsonic's internal HSQLDB. This is because there is no other way to access the Play Counts on the DB.
+
+The official Subsonic app for android will not work with this as it does not report play counts back to the server.
+
+
 ## Usage
 ### Download scrobbles
 ```
@@ -19,14 +29,7 @@ This will overwrite the current Rediscover Weekly playlist.
 python ./rediscover_weekly.py playlist
 ```
 
-## Prerequisites
- - A Last.fm account (used for play counts)
- - A subsonic instance
- - Postgresql (hopefully support SQLite)
-
 ## Future Features
  - Take play counts into account instead of just checking that they aren't 0
- - SQLite support
- - MySQL support
- - Google Play support?
+ - Move scrobbles to subsonic db and get rid of postgres requirement
 

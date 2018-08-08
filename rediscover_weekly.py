@@ -10,8 +10,16 @@ import sys
 from dateutil import parser
 import time
 import Levenshtein
+import pymysql.cursors
 
 conn = psycopg2.connect(dbname=config.db['dbname'], user=config.db['user'], password=config.db['password'], host=config.db['host'], port=config.db['port'])
+subsonic_conn = pymysql.connect(host=config.subsonicdb['host'],
+                             user=config.subsonicdb['user'],
+                             password=config.subsonicdb['password'],
+                             db=config.subsonicdb['dbname'],
+                             charset='utf8mb4',
+                             cursorclass=pymysql.cursors.DictCursor)
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -24,10 +32,6 @@ randomness = config.playlist_options['randomness']
 # (top 20% of play counts)
 degree_of_favorite = 30
 num_of_random = int(round((list_length * (randomness / 100))))
-url = '{base}/rest/{resource}?u={user}&t={password}&s={salt}&v=1.2.0&c=rediscoverweekly{query}'
-user = config.subsonic['user']
-base = config.subsonic['baseurl']
-passwd = config.subsonic['password']
 
 
 def randomword(length):
@@ -76,48 +80,45 @@ def get_max_plays():
     conn.close()
 
 
-def get_url(resource, query):
-    salt = randomword(6)
-    salted = passwd + salt
-    password = hashlib.md5(salted.encode('utf-8')).hexdigest()
-    fullurl = url.format(base=base, user=user, password=password, salt=salt, resource=resource, query=query)
-    return fullurl
-
-
 def build_songid_list(songs):
-    r = requests.get(get_url('getRandomSongs', '&size=400'))
-    s = r.content
-    x = minidom.parseString(s)
-    randomsongs = x.getElementsByTagName('song')
+    # get random least play songs from subsonic db
     newsongs = []
-
-    for song in randomsongs:
-        count = song.attributes['playCount'].value
-        if int(count) == 0 and len(newsongs) < num_of_random:
-            songid = song.attributes['id'].value
-            newsongs.append(songid)
-
-    if len(newsongs) < num_of_random:
-        logger.warn('not enough random songs')
+    with subsonic_conn.cursor() as cursor:
+        # Read a single record
+        sql = '''select id from (
+                  SELECT *
+                  FROM media_file
+                  WHERE type = 'MUSIC'
+                  ORDER BY play_count
+                  LIMIT 400
+                ) as Music
+                order by rand() limit ''' + str(num_of_random)
+        cursor.execute(sql)
+        newsongs = cursor.fetchall()
 
     # Now we have new songs to add to the list
     for song in songs:
         name = song[0]
         artist = song[1]
         album = song[2]
-        r = requests.get(get_url('search2', '&query=%s' % (name,)))
-        s = r.content
-        list = minidom.parseString(s)
-        listsongs = list.getElementsByTagName('song')
-        thesong = []
+        try:
+            with subsonic_conn.cursor() as cursor:
+                # TODO: Fix this injection risk
+                sql = "select id, title, artist from media_file where title like '%" + str.replace(name, "'", "\\'") + "%'"
+                cursor.execute(sql)
+                listsongs = cursor.fetchall()
+        except Exception as e:
+            logger.info('Failed to search songs by name ' + name)
+            logger.info(e)
+
         for s in listsongs:
-            if match_song(s.attributes['title'].value, name, s.attributes['artist'].value, artist):
-                thesong = [s]
+            if match_song(s['title'], name, s['artist'], artist):
+                thesong = s
                 break
         if len(thesong) == 0:
             logger.warn('No song found for %s' % (name,))
-            break
-        newsongs.append(thesong[0].attributes['id'].value)
+        else:
+            newsongs.append(thesong)
 
     return newsongs
 
@@ -154,24 +155,31 @@ def match_song(newSongName, searchSongName, newArtistName, searchedArtistName):
 
 
 def build_playlist(songidlist):
-    # Get the playlists to see if we already made a rediscover
-    r = requests.get(get_url('getPlaylists', ''))
-    s = r.content
-    x = minidom.parseString(s)
-    playlists = x.getElementsByTagName('playlist')
-    rediscover = [i for i in playlists if str(i.attributes['name'].value) == 'Rediscover Weekly']
+    logger.info('Songs in playlist: {count}'.format(count=len(songidlist)))
+    # Get the playlist id
+    with subsonic_conn.cursor() as cursor:
+        sql = "select id from playlist where name = 'Rediscover Weekly'"
+        cursor.execute(sql)
+        playlist = cursor.fetchone()
+        sql = "select id from playlist_file order by id desc limit 1"
+        cursor.execute(sql)
+        id = cursor.fetchone()['id']
+        # delete existing songs
+        sql = "delete from playlist_file where playlist_id = %s"
+        cursor.execute(sql, (playlist['id'],))
 
-    if len(rediscover) != 0:
-        # Delete the playlist
-        id = rediscover[0].attributes['id'].value
-        r = requests.get(get_url('deletePlaylist', '&id=%s' % (id,)))
+    subsonic_conn.commit()
 
     # We do not have a rediscover, create it
     # build the params
-    params = '&songId='.join([str(x) for x in songidlist])
-    r = requests.get(get_url('createPlaylist', '&name=Rediscover%20Weekly&songId={}'.format(params)))
-    s = r.content
-    x = minidom.parseString(s)
+    with subsonic_conn.cursor() as cursor:
+        for song in songidlist:
+            id += 1
+            # Create a new record
+            sql = "INSERT INTO playlist_file (id, playlist_id, media_file_id) VALUES (%s, %s, %s)"
+            cursor.execute(sql, (id, playlist['id'], song['id']))
+
+    subsonic_conn.commit()
 
 
 def get_scrobbles():
@@ -196,10 +204,12 @@ def get_scrobbles():
                 cur.execute('insert into trackscrobbles (date, tick, name, artist, album) values (%s, %s, %s, %s, %s)', (parseddate, tick, name, artist, album))
             else:
                 logger.info('Already have data for ' + name + ' | ' + str(date))
-            conn.commit()
         except Exception as e:
             logger.info('FAILED FOR: ' + name + ' | ' + str(date))
             logger.info(e)
+            conn.rollback()
+        else:
+            conn.commit()
     cur.close()
     conn.close()
 
@@ -211,4 +221,4 @@ if __name__ == "__main__":
     else:
         songs = get_scrobble_list()
         songlist = build_songid_list(songs)
-        #build_playlist(songlist)
+        build_playlist(songlist)

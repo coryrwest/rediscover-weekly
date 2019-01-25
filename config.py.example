@@ -1,4 +1,4 @@
-db = dict(
+scrobbledb = dict(
     dbname='', user='', password='', host='', port=5432
 )
 lastfm = dict(

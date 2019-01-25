@@ -3,8 +3,6 @@ import requests
 import psycopg2
 import logging
 import random, string
-import hashlib
-from xml.dom import minidom
 import config
 import sys
 from dateutil import parser
@@ -12,7 +10,12 @@ import time
 import Levenshtein
 import pymysql.cursors
 
-conn = psycopg2.connect(dbname=config.db['dbname'], user=config.db['user'], password=config.db['password'], host=config.db['host'], port=config.db['port'])
+conn = psycopg2.connect(dbname=config.scrobbledb['dbname'],
+                        user=config.scrobbledb['user'],
+                        password=config.scrobbledb['password'],
+                        host=config.scrobbledb['host'],
+                        port=config.scrobbledb['port'])
+
 subsonic_conn = pymysql.connect(host=config.subsonicdb['host'],
                              user=config.subsonicdb['user'],
                              password=config.subsonicdb['password'],
@@ -20,18 +23,8 @@ subsonic_conn = pymysql.connect(host=config.subsonicdb['host'],
                              charset='utf8mb4',
                              cursorclass=pymysql.cursors.DictCursor)
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-list_length = config.playlist_options['length']
-# percentage of random songs (0 play count) in the playlist
-randomness = config.playlist_options['randomness']
-# favoritism settings
-# how to pick songs with high play counts
-# percentage of songs in the playlist that are considered favorites
-# (top 20% of play counts)
-degree_of_favorite = 30
-num_of_random = int(round((list_length * (randomness / 100))))
+logger = logging.getLogger('rediscover_weekly_logger')
+logger.setLevel(logging.DEBUG)
 
 
 def randomword(length):
@@ -39,8 +32,17 @@ def randomword(length):
 
 
 # Get the random list for the playlist. 90 songs, ~ 6 hours.
-# Needs about 8 hours of listening to start working.
+# Needs about 8 hours of listening to start working well.
 def get_scrobble_list():
+    list_length = config.playlist_options['length']
+    # percentage of random songs (0 play count) in the playlist
+    randomness = config.playlist_options['randomness']
+    # favoritism settings
+    # how to pick songs with high play counts
+    # percentage of songs in the playlist that are considered favorites
+    # (top 20% of play counts)
+    degree_of_favorite = 30
+    num_of_random = int(round((list_length * (randomness / 100))))
     # Get all the songs played and sort them randomly
     cur = conn.cursor()
     cur.execute("""select

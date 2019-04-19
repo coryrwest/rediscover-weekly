@@ -26,7 +26,6 @@ subsonic_conn = pymysql.connect(host=config.subsonicdb['host'],
 logger = logging.getLogger('rediscover_weekly_logger')
 logger.setLevel(logging.DEBUG)
 
-
 def randomword(length):
     return ''.join(random.choice(string.ascii_lowercase) for i in range(length))
 
@@ -83,18 +82,26 @@ def get_max_plays():
 
 
 def build_songid_list(songs):
+    # same calculation as above.
+    list_length = config.playlist_options['length']
+    randomness = config.playlist_options['randomness']
+    user = config.playlist_options['subsonic_user']
+    num_of_random = int(round((list_length * (randomness / 100))))
     # get random least play songs from subsonic db
     newsongs = []
     with subsonic_conn.cursor() as cursor:
-        # Read a single record
+        # Make sure to only get songs that this user can access
         sql = '''select id from (
                   SELECT *
                   FROM media_file
-                  WHERE type = 'MUSIC'
+                  WHERE type = 'MUSIC' and folder in (
+                    select path from music_folder mf
+                    where mf.id in (select music_folder_id from music_folder_user where username = '%s')
+                  )
                   ORDER BY play_count
                   LIMIT 400
                 ) as Music
-                order by rand() limit ''' + str(num_of_random)
+                order by rand() limit %s''' % (user, num_of_random)
         cursor.execute(sql)
         newsongs = cursor.fetchall()
 
@@ -106,7 +113,13 @@ def build_songid_list(songs):
         try:
             with subsonic_conn.cursor() as cursor:
                 # TODO: Fix this injection risk
-                sql = "select id, title, artist from media_file where title like '%" + str.replace(name, "'", "\\'") + "%'"
+                sql = """SELECT id, title, artist
+                    FROM media_file
+                    WHERE type = 'MUSIC' and folder in (
+                      select path from music_folder mf
+                      where mf.id in (select music_folder_id from music_folder_user where username = '%s')
+                    ) and title like """ % (user,)
+                sql = sql + "'%" + str.replace(name, "'", "\\'") + "%'"
                 cursor.execute(sql)
                 listsongs = cursor.fetchall()
         except Exception as e:

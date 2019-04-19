@@ -15,5 +15,6 @@ playlist_options = dict(
     # number of songs
     length=100,
     # randomness percentage
-    randomness=20
+    randomness=20,
+    subsonic_user='admin'
 )

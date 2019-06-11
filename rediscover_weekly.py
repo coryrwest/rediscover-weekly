@@ -9,6 +9,7 @@ from dateutil import parser
 import time
 import Levenshtein
 import pymysql.cursors
+import re
 
 conn = psycopg2.connect(dbname=config.scrobbledb['dbname'],
                         user=config.scrobbledb['user'],
@@ -24,7 +25,8 @@ subsonic_conn = pymysql.connect(host=config.subsonicdb['host'],
                              cursorclass=pymysql.cursors.DictCursor)
 
 logger = logging.getLogger('rediscover_weekly_logger')
-logger.setLevel(logging.DEBUG)
+logging.basicConfig(level=logging.DEBUG)
+
 
 def randomword(length):
     return ''.join(random.choice(string.ascii_lowercase) for i in range(length))
@@ -42,6 +44,8 @@ def get_scrobble_list():
     # (top 20% of play counts)
     degree_of_favorite = 30
     num_of_random = int(round((list_length * (randomness / 100))))
+    # pad the random songs to make sure we have enough including de-dupe.
+    limit = int(round((list_length - num_of_random) * 1.5, 0))
     # Get all the songs played and sort them randomly
     cur = conn.cursor()
     cur.execute("""select
@@ -49,7 +53,7 @@ def get_scrobble_list():
         from trackscrobbles
         group by name, artist, album
         order by random
-        limit %s""" % ((list_length - num_of_random),))
+        limit %s""" % (limit,))
     # TODO: eventually check most played songs and limit their place in the playlist.
     try:
         songs = cur.fetchall()
@@ -121,17 +125,18 @@ def build_songid_list(songs):
                     ) and title like """ % (user,)
                 sql = sql + "'%" + str.replace(name, "'", "\\'") + "%'"
                 cursor.execute(sql)
-                listsongs = cursor.fetchall()
+                existing_songs = cursor.fetchall()
         except Exception as e:
             logger.info('Failed to search songs by name ' + name)
             logger.info(e)
 
-        for s in listsongs:
+        thesong = None
+        for s in existing_songs:
             if match_song(s['title'], name, s['artist'], artist):
                 thesong = s
                 break
-        if len(thesong) == 0:
-            logger.warn('No song found for %s' % (name,))
+        if thesong is None or len(thesong) == 0:
+            logger.warning('No song found for %s - %s' % (name, artist))
         else:
             newsongs.append(thesong)
 
@@ -148,10 +153,35 @@ def match_song(newSongName, searchSongName, newArtistName, searchedArtistName):
     if newsong == searchedsong:
         songNameMatch = True
     # If distance is less than 10% of length then match
-    distance = Levenshtein.distance(newsong, searchedsong)
-    threshold = int(round((len(searchedsong) * .1)))
-    if distance < threshold:
-        songNameMatch = True
+    if not songNameMatch:
+        distance = Levenshtein.distance(newsong, searchedsong)
+        threshold = int(round((len(searchedsong) * .1)))
+        if distance <= threshold:
+            songNameMatch = True
+    # Try removing parens
+    if not songNameMatch:
+        noParensSearched = re.sub(r'\([^)]*\)', '', searchedsong)
+        noParensNew = re.sub(r'\([^)]*\)', '', newsong)
+        distance = Levenshtein.distance(noParensNew, noParensSearched)
+        threshold = int(round((len(noParensSearched) * .1)))
+        if distance <= threshold:
+            songNameMatch = True
+    # Try clearing text after -
+    if not songNameMatch:
+        searchedSplit = searchedsong.split('-', 1)[0]
+        newSplit = newsong.split('-', 1)[0]
+        distance = Levenshtein.distance(newSplit, searchedSplit)
+        threshold = int(round((len(searchedSplit) * .1)))
+        if distance <= threshold:
+            songNameMatch = True
+    # Try clearing text after feat.
+    if not songNameMatch:
+        searchedFeat = searchedsong.split('feat', 1)[0]
+        newFeat = newsong.split('feat', 1)[0]
+        distance = Levenshtein.distance(newFeat, searchedFeat)
+        threshold = int(round((len(searchedFeat) * .1)))
+        if distance <= threshold:
+            songNameMatch = True
     # ------
     # ARTIST
     # ------
@@ -161,10 +191,19 @@ def match_song(newSongName, searchSongName, newArtistName, searchedArtistName):
     if newartist == searchedartist:
         artistMatch = True
     # If distance is less than 10% of length then match
-    distance = Levenshtein.distance(newartist, searchedartist)
-    threshold = int(round((len(searchedartist) * .1)))
-    if distance < threshold:
-        artistMatch = True
+    if not artistMatch:
+        distance = Levenshtein.distance(newartist, searchedartist)
+        threshold = int(round((len(searchedartist) * .1)))
+        if distance <= threshold:
+            artistMatch = True
+    # Try clearing text after feat.
+    if not artistMatch:
+        searchedSplit = searchedartist.split('feat', 1)[0]
+        newSplit = newartist.split('feat', 1)[0]
+        distance = Levenshtein.distance(newSplit, searchedSplit)
+        threshold = int(round((len(searchedSplit) * .1)))
+        if distance <= threshold:
+            artistMatch = True
 
     return songNameMatch and artistMatch
 
@@ -200,12 +239,17 @@ def build_playlist(songidlist):
 def get_scrobbles():
     key = config.lastfm['key']
     user = config.lastfm['user']
-    url = 'http://ws.audioscrobbler.com/2.0/?method=user.getrecenttracks&user=%s&api_key=%s&format=json&limit=200' % (user, key)
+    url = 'http://ws.audioscrobbler.com/2.0/?method=user.getrecenttracks&user=%s&api_key=%s&format=json&limit=1000' % (user, key)
     r = requests.get(url)
     s = r.json()
+    if not r.ok:
+        logger.error(r.text)
+        return
 
     cur = conn.cursor()
     for item in s['recenttracks']['track']:
+        if 'date' not in item:
+            continue
         date = item['date']['#text']
         parseddate = parser.parse(date)
         tick = str(time.mktime(parser.parse(date).timetuple()))

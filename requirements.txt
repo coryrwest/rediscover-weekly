@@ -1,4 +1,4 @@
-lxml==4.2.1
+lxml==4.6.3
 peewee==3.3.2
 psycopg2==2.7.3.2
 python-Levenshtein==0.12.0

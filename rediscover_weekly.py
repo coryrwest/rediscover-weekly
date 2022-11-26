@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 import requests
 import psycopg2
+from psycopg2 import extras
 import logging
-import random, string
 import config
 import sys
-from dateutil import parser
+from datetime import datetime
 import time
 import Levenshtein
-import pymysql.cursors
 import re
 
 conn = psycopg2.connect(dbname=config.scrobbledb['dbname'],
@@ -17,19 +16,15 @@ conn = psycopg2.connect(dbname=config.scrobbledb['dbname'],
                         host=config.scrobbledb['host'],
                         port=config.scrobbledb['port'])
 
-subsonic_conn = pymysql.connect(host=config.subsonicdb['host'],
-                             user=config.subsonicdb['user'],
-                             password=config.subsonicdb['password'],
-                             db=config.subsonicdb['dbname'],
-                             charset='utf8mb4',
-                             cursorclass=pymysql.cursors.DictCursor)
+subsonic_conn = psycopg2.connect(dbname=config.subsonicdb['dbname'],
+                        user=config.subsonicdb['user'],
+                        password=config.subsonicdb['password'],
+                        host=config.subsonicdb['host'],
+                        port=config.subsonicdb['port'])
+
 
 logger = logging.getLogger('rediscover_weekly_logger')
 logging.basicConfig(level=logging.DEBUG)
-
-
-def randomword(length):
-    return ''.join(random.choice(string.ascii_lowercase) for i in range(length))
 
 
 # Get the random list for the playlist. 90 songs, ~ 6 hours.
@@ -67,17 +62,17 @@ def get_scrobble_list():
 
 # for determining most listened to songs to ensure that there is variety in the playlist.
 def get_max_plays():
-    cur = conn.cursor()
+    cur = conn.cursor(cursor_factory=extras.DictCursor)
     cur.execute("""
         select
-          count(*), name, artist, album
+          count(*) as plays, name, artist, album
         from trackscrobbles
         group by name, artist, album
         order by count desc
         limit 1""")
     try:
         song = cur.fetchone()
-        return song[0]
+        return song['plays']
     except Exception as e:
         logger.info('Failed to retrieve scrobbled tracks')
         logger.info(e)
@@ -93,7 +88,7 @@ def build_songid_list(songs):
     num_of_random = int(round((list_length * (randomness / 100))))
     # get random least play songs from subsonic db
     newsongs = []
-    with subsonic_conn.cursor() as cursor:
+    with subsonic_conn.cursor(cursor_factory=extras.DictCursor) as cursor:
         # Make sure to only get songs that this user can access
         sql = '''select id from (
                   SELECT *
@@ -105,17 +100,17 @@ def build_songid_list(songs):
                   ORDER BY play_count
                   LIMIT 400
                 ) as Music
-                order by rand() limit %s''' % (user, num_of_random)
+                order by RANDOM () limit %s''' % (user, num_of_random)
         cursor.execute(sql)
         newsongs = cursor.fetchall()
 
     # Now we have new songs to add to the list
     for song in songs:
-        name = song[0]
-        artist = song[1]
+        name = song[0].encode('UTF-8')
+        artist = song[1].encode('UTF-8')
         album = song[2]
         try:
-            with subsonic_conn.cursor() as cursor:
+            with subsonic_conn.cursor(cursor_factory=extras.DictCursor) as cursor:
                 # TODO: Fix this injection risk
                 sql = """SELECT id, title, artist
                     FROM media_file
@@ -123,7 +118,8 @@ def build_songid_list(songs):
                       select path from music_folder mf
                       where mf.id in (select music_folder_id from music_folder_user where username = '%s')
                     ) and title like """ % (user,)
-                sql = sql + "'%" + str.replace(name, "'", "\\'") + "%'"
+                escaped = name.decode('UTF-8').replace("'", "''")
+                sql = f"{sql} '%{escaped}%'"
                 cursor.execute(sql)
                 existing_songs = cursor.fetchall()
         except Exception as e:
@@ -132,7 +128,7 @@ def build_songid_list(songs):
 
         thesong = None
         for s in existing_songs:
-            if match_song(s['title'], name, s['artist'], artist):
+            if match_song(s['title'].encode('UTF-8'), name, s['artist'].encode('UTF-8'), artist):
                 thesong = s
                 break
         if thesong is None or len(thesong) == 0:
@@ -211,13 +207,15 @@ def match_song(newSongName, searchSongName, newArtistName, searchedArtistName):
 def build_playlist(songidlist):
     logger.info('Songs in playlist: {count}'.format(count=len(songidlist)))
     # Get the playlist id
-    with subsonic_conn.cursor() as cursor:
+    with subsonic_conn.cursor(cursor_factory=extras.DictCursor) as cursor:
         sql = "select id from playlist where name = 'Rediscover Weekly'"
         cursor.execute(sql)
         playlist = cursor.fetchone()
         sql = "select id from playlist_file order by id desc limit 1"
         cursor.execute(sql)
-        id = cursor.fetchone()['id']
+        # get the current ID to keep the sequence correct for insert
+        latest = cursor.fetchone()
+        id = 1 if latest is None else latest['id']
         # delete existing songs
         sql = "delete from playlist_file where playlist_id = %s"
         cursor.execute(sql, (playlist['id'],))
@@ -226,7 +224,7 @@ def build_playlist(songidlist):
 
     # We do not have a rediscover, create it
     # build the params
-    with subsonic_conn.cursor() as cursor:
+    with subsonic_conn.cursor(cursor_factory=extras.DictCursor) as cursor:
         for song in songidlist:
             id += 1
             # Create a new record
@@ -239,20 +237,20 @@ def build_playlist(songidlist):
 def get_scrobbles():
     key = config.lastfm['key']
     user = config.lastfm['user']
-    url = 'http://ws.audioscrobbler.com/2.0/?method=user.getrecenttracks&user=%s&api_key=%s&format=json&limit=1000' % (user, key)
+    url = 'http://ws.audioscrobbler.com/2.0/?method=user.getrecenttracks&user=%s&api_key=%s&format=json&limit=300' % (user, key)
     r = requests.get(url)
     s = r.json()
     if not r.ok:
         logger.error(r.text)
         return
 
-    cur = conn.cursor()
+    cur = conn.cursor(cursor_factory=extras.DictCursor)
     for item in s['recenttracks']['track']:
         if 'date' not in item:
             continue
         date = item['date']['#text']
-        parseddate = parser.parse(date)
-        tick = str(time.mktime(parser.parse(date).timetuple()))
+        parseddate = datetime.strptime(date, "%d %b %Y, %H:%M")
+        tick = str(time.mktime(parseddate.timetuple()))
         name = str(item['name'])
         artist = item['artist']['#text']
         album = item['album']['#text']

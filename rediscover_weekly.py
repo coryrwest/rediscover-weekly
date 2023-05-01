@@ -135,7 +135,7 @@ def build_songid_list(songs):
             # Add this missed track to the db for future aquisition
             curr = conn.cursor(cursor_factory=extras.DictCursor)
             sql = "INSERT INTO missed_tracks (track, artist, album) VALUES (%s, %s, %s)"
-            curr.execute(sql, (name, artist, album))
+            curr.execute(sql, (song[0], song[1], album))
             conn.commit()
 
             logger.warning('No song found for %s - %s' % (name, artist))
